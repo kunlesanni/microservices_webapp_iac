@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backend-monitor
+  namespace: pyreact-{{ENVIRONMENT}}
+  labels:
+    app: backend
+    environment: {{ENVIRONMENT}}
+spec:
+  selector:
+    matchLabels:
+      app: backend
+      environment: {{ENVIRONMENT}}
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s

@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migration-{{IMAGE_TAG}}
+  namespace: pyreact-{{ENVIRONMENT}}
+  labels:
+    app: db-migration
+    environment: {{ENVIRONMENT}}
+spec:
+  template:
+    metadata:
+      labels:
+        app: db-migration
+        environment: {{ENVIRONMENT}}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: db-migration
+        image: {{ACR_NAME}}.azurecr.io/backend:{{IMAGE_TAG}}
+        command: ["python", "-c"]
+        args: 
+        - |
+          from main import Base, engine
+          print("Creating database tables...")
+          Base.metadata.create_all(bind=engine)
+          print("Database migration completed successfully!")
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: DATABASE_URL
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+  backoffLimit: 3

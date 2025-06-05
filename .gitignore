@@ -1,0 +1,36 @@
+# Terraform files
+*.tfstate
+*.tfstate.backup
+*.tfplan
+.terraform/*
+terraform.tfvars
+.terraform.lock.hcl
+terraform.tfstate./*
+.terraform\*
+*.terraform\*
+*terraform/*
+
+**/.terraform/*
+**/.terraform*
+**/.terraform.lock.hcl
+**/terraform.tfstate
+
+<!-- The series of commands below will remove all of the items from the Git index (not from the working directory or local repository), and then will update the Git index, while respecting Git ignores. PS. Index = Cache
+
+First:
+git rm -r --cached .
+git add .
+
+Then:
+git commit -am "Remove ignored files"
+
+
+Or as a one-liner:
+
+git rm -r --cached . && git add . && git commit -am "Remove ignored files" -->
+
+local_test/
+
+.vscode/
+
+yml.py
