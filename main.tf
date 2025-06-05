@@ -177,6 +177,19 @@ resource "azurerm_kubernetes_cluster" "main" {
   }
 
   tags = local.common_tags
+  lifecycle {
+    ignore_changes = [
+      default_node_pool[0].node_count, # Allow auto-scaling to change node count
+    ]
+      
+  }
+}
+
+# Assign role assignment to manage AKS cluster
+resource "azurerm_role_assignment" "aks_admin" {
+  principal_id   = data.azurerm_client_config.current.object_id
+  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
+  scope          = azurerm_kubernetes_cluster.main.id
 }
 
 # User node pool for applications - simplified

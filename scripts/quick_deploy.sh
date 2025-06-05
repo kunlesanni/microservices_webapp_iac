@@ -11,17 +11,16 @@ echo "======================================================="
 echo ""
 
 # Check if this is first run
-if [ ! -f "terraform/terraform.tfvars" ]; then
+if [ ! -f "terraform.tfvars" ]; then
     echo "🎯 First-time setup detected!"
     echo ""
     
     # Get basic configuration
     read -p "Enter environment name (dev/staging/prod) [dev]: " ENVIRONMENT
     ENVIRONMENT=${ENVIRONMENT:-dev}
-    
-    read -p "Enter Azure region [East US]: " LOCATION
-    LOCATION=${LOCATION:-"East US"}
-    
+    read -p "Enter Azure region [uksouth]: " LOCATION
+    LOCATION=${LOCATION:-"uksouth"}
+
     read -p "Enter project name [pyreact]: " PROJECT_NAME
     PROJECT_NAME=${PROJECT_NAME:-pyreact}
     
@@ -40,7 +39,7 @@ if [ ! -f "terraform/terraform.tfvars" ]; then
     
     # Create terraform.tfvars
     echo "📝 Creating terraform.tfvars..."
-    cat > terraform/terraform.tfvars << EOF
+    cat > terraform.tfvars << EOF
 environment = "$ENVIRONMENT"
 location = "$LOCATION"
 project_name = "$PROJECT_NAME"
@@ -48,14 +47,14 @@ postgres_admin_username = "$PG_USERNAME"
 postgres_admin_password = "$PG_PASSWORD"
 aks_admin_group_object_ids = []
 EOF
-    
-    echo "✅ Configuration saved to terraform/terraform.tfvars"
+
+    echo "✅ Configuration saved to terraform.tfvars"
     echo ""
 fi
 
 # Phase 1: Infrastructure
+echo "=========================================="
 echo "🏗️  Phase 1: Deploying Infrastructure..."
-cd terraform
 
 if [ ! -d ".terraform" ]; then
     echo "🔧 Initializing Terraform..."
@@ -78,9 +77,9 @@ echo "  ACR: $ACR_NAME"
 echo "  Resource Group: $RESOURCE_GROUP"
 echo "  AKS Cluster: $AKS_CLUSTER"
 
-cd ..
 
 # Phase 2: Get cluster credentials
+echo "==========================================="
 echo ""
 echo "🔧 Phase 2: Configuring Kubernetes access..."
 az aks get-credentials \
@@ -92,6 +91,7 @@ kubectl cluster-info
 echo "✅ Kubernetes access configured!"
 
 # Phase 3: Build and push images
+echo "==========================================="
 echo ""
 echo "🐳 Phase 3: Building and pushing container images..."
 export ACR_NAME=$ACR_NAME
@@ -100,8 +100,8 @@ export ACR_NAME=$ACR_NAME
 # Phase 4: Deploy applications
 echo ""
 echo "🚀 Phase 4: Deploying applications to Kubernetes..."
-export ENVIRONMENT=$(grep 'environment' terraform/terraform.tfvars | cut -d'"' -f2)
-export PROJECT_NAME=$(grep 'project_name' terraform/terraform.tfvars | cut -d'"' -f2)
+export ENVIRONMENT=$(grep 'environment' terraform.tfvars | cut -d'"' -f2)
+export PROJECT_NAME=$(grep 'project_name' terraform.tfvars | cut -d'"' -f2)
 ./scripts/deploy_apps.sh
 
 echo ""
