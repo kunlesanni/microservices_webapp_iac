@@ -11,7 +11,7 @@ python-react-cloud-native/
 ├── .github/
 │   └── workflows/
 │       └── infrastructure.yml           # Complete CI/CD pipeline
-├── terraform/
+├── terraform/                           # Infrastructure as Code
 │   ├── main.tf                          # AKS, ACR, PostgreSQL, Redis infrastructure
 │   ├── variables.tf                     # Parameterized configuration
 │   ├── outputs.tf                       # Infrastructure outputs
@@ -26,7 +26,7 @@ python-react-cloud-native/
 │       ├── package.json                 # Node.js dependencies
 │       ├── Dockerfile                   # Nginx-based container
 │       └── nginx.conf                   # Production web server config
-├── k8s/
+├── k8s/                                 # Kubernetes manifests
 │   ├── namespace.yaml                   # Kubernetes namespace
 │   ├── secrets.yaml                     # Application secrets
 │   ├── backend/                         # Backend Kubernetes manifests
@@ -34,12 +34,99 @@ python-react-cloud-native/
 │   ├── ingress/                         # Ingress configuration
 │   ├── monitoring/                      # Prometheus monitoring
 │   └── policies/                        # Security policies
-├── scripts/
-│   ├── setup-infrastructure.sh         # Infrastructure bootstrap
-│   ├── build-images.sh                 # Container build automation
-│   └── deploy-apps.sh                   # Application deployment
+├── scripts/                             # Automation scripts
+│   ├── setup_infrastructure.sh         # Infrastructure bootstrap
+│   ├── build_images.sh                 # Container build automation
+│   ├── deploy_apps.sh                   # Application deployment
+│   ├── github_setup.sh                 # GitHub Actions setup
+│   └── utils/
+│       └── check_yaml.sh               # YAML validation utility
+├── docs/
+│   └── GITHUB_ACTIONS_SETUP.md         # GitHub Actions setup guide
 └── README.md
 ```
+
+## Quick Start
+
+### Option 1: GitHub Actions (Recommended)
+
+1. **Setup GitHub Actions:**
+   ```bash
+   ./scripts/github_setup.sh
+   ```
+
+2. **Push to GitHub:**
+   ```bash
+   git add .
+   git commit -m "Initial deployment"
+   git push origin main
+   ```
+
+3. **Monitor deployment** in GitHub Actions tab
+
+### Option 2: Local Deployment
+
+1. **Setup infrastructure:**
+   ```bash
+   ./scripts/setup_infrastructure.sh
+   ```
+
+2. **Quick deploy everything:**
+   ```bash
+   ./scripts/quick_deploy.sh
+   ```
+
+## GitHub Actions Setup
+
+### Prerequisites
+
+Before pushing to GitHub, you need:
+
+1. **Azure CLI** logged in (`az login`)
+2. **GitHub CLI** logged in (`gh auth login`)
+3. **Azure subscription** with appropriate permissions
+
+### Automated Setup
+
+Run the setup script to configure everything:
+
+```bash
+./scripts/github_setup.sh
+```
+
+This will:
+- Create Azure service principal
+- Set up Terraform backend storage
+- Configure GitHub secrets
+- Set database password
+
+### Manual Workflow Triggers
+
+Go to GitHub Actions → "Cloud-Native Infrastructure & Applications" → "Run workflow"
+
+**Available options:**
+- **Environment**: `dev`, `staging`, `prod`
+- **Action**: `plan`, `apply`, `destroy`, `deploy-apps`
+
+**Examples:**
+- Deploy to dev: Environment=`dev`, Action=`apply`
+- Deploy apps only: Environment=`dev`, Action=`deploy-apps`
+- Destroy infrastructure: Environment=`dev`, Action=`destroy`
+
+### Required GitHub Secrets
+
+The setup script will create these automatically:
+
+| Secret | Description |
+|--------|-------------|
+| `AZURE_CLIENT_ID` | Service principal client ID |
+| `AZURE_CLIENT_SECRET` | Service principal secret |
+| `AZURE_SUBSCRIPTION_ID` | Azure subscription ID |
+| `AZURE_TENANT_ID` | Azure tenant ID |
+| `AZURE_CREDENTIALS` | Full service principal JSON |
+| `POSTGRES_ADMIN_PASSWORD` | Database password |
+| `TERRAFORM_STATE_RG` | Terraform state resource group |
+| `TERRAFORM_STATE_SA` | Terraform state storage account |
 
 ## Architecture Highlights
 
@@ -73,67 +160,6 @@ python-react-cloud-native/
 - **Infrastructure as Code** with Terraform
 - **Automated security scanning** with multiple tools
 
-## Quick Start Guide
-
-### Prerequisites
-
-1. **Azure CLI** logged in with appropriate permissions
-2. **Terraform** >= 1.6.0
-3. **kubectl** for Kubernetes management
-4. **Docker** for local development
-5. **GitHub repository** with Actions enabled
-
-### Step 1: Infrastructure Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/python-react-cloud-native
-cd python-react-cloud-native
-
-# Setup Azure backend for Terraform state
-./scripts/setup-infrastructure.sh
-
-# Configure GitHub secrets
-./scripts/setup-github-secrets.sh
-```
-
-### Step 2: Deploy Infrastructure
-
-**Option A: GitHub Actions (Recommended)**
-
-```bash
-# Push to main branch for automatic deployment
-git add .
-git commit -m "Initial infrastructure deployment"
-git push origin main
-```
-
-**Option B: Manual Deployment**
-
-```bash
-cd terraform
-
-# Initialize and plan
-terraform init
-terraform plan -var="environment=dev"
-
-# Deploy infrastructure
-terraform apply -var="environment=dev"
-```
-
-### Step 3: Build and Deploy Applications
-
-```bash
-# Manual build and deployment
-./scripts/build-images.sh
-./scripts/deploy-apps.sh
-
-# Or trigger via GitHub Actions workflow
-gh workflow run "Cloud-Native Infrastructure & Applications" \
-  --field environment=dev \
-  --field action=deploy-apps
-```
-
 ## Application Features
 
 ### 🐍 **FastAPI Backend**
@@ -164,130 +190,15 @@ GET  /api/stats           # Get task statistics
 GET  /health              # Health check endpoint
 ```
 
-## Infrastructure Deep Dive
-
-### **Azure Kubernetes Service Configuration**
-
-```hcl
-# Multi-zone, auto-scaling AKS cluster
-resource "azurerm_kubernetes_cluster" "main" {
-  kubernetes_version = "1.28.5"
-  
-  default_node_pool {
-    enable_auto_scaling = true
-    min_count          = 1
-    max_count          = 10
-    availability_zones = ["1", "2", "3"]
-  }
-  
-  # Integrated Application Gateway Ingress
-  ingress_application_gateway {
-    enabled = true
-  }
-  
-  # Container Insights monitoring
-  oms_agent {
-    enabled = true
-  }
-}
-```
-
-### **Database & Caching Architecture**
-
-- **PostgreSQL Flexible Server** with zone-redundant high availability
-- **Redis Cache** for session storage and API response caching
-- **Private networking** with VNet integration
-- **Automated backups** with 35-day retention
-
-### **Security Implementation**
-
-- **Network Security Groups** with least-privilege access
-- **Pod Security Policies** enforcing security standards
-- **Key Vault** for secrets management
-- **Private endpoints** for database connectivity
-
-## CI/CD Pipeline Features
-
-### 🔄 **Automated Workflows**
-
-1. **Infrastructure Plan** - Terraform planning on PRs
-2. **Security Scanning** - Checkov, TFSec, Kubesec analysis
-3. **Container Building** - Multi-arch images with vulnerability scanning
-4. **Application Deployment** - Rolling updates with health checks
-5. **Integration Testing** - Automated API and UI testing
-
-### 📋 **GitHub Actions Workflow**
-
-```yaml
-# Parallel execution for efficiency
-- Infrastructure provisioning
-- Container image building (backend + frontend)
-- Security scanning (infrastructure + containers)
-- Kubernetes deployment with health validation
-- Integration testing and monitoring setup
-```
-
-## Cost Optimization
-
-**Development Environment**: ~$200-400/month
-
-- AKS with 2 Standard_D2s_v3 nodes
-- PostgreSQL GP_Standard_D2s_v3
-- Standard Redis cache
-- Application Gateway v2
-
-**Production Environment**: ~$800-1500/month
-
-- Multi-zone AKS with auto-scaling
-- High-availability PostgreSQL
-- Premium Redis with clustering
-- WAF-enabled Application Gateway
-
-## Monitoring & Observability
-
-### **Built-in Monitoring Stack**
-
-- **Azure Monitor** - Infrastructure and application metrics
-- **Application Insights** - Distributed tracing and performance
-- **Container Insights** - Kubernetes cluster monitoring
-- **Log Analytics** - Centralized log aggregation
-
-### **Health Checks & Alerting**
-
-- Kubernetes liveness and readiness probes
-- Application Gateway health probes
-- Automated scaling based on CPU/memory metrics
-- Custom alerts for application-specific metrics
-
-## Security Best Practices
-
-### **Container Security**
-
-- Non-root user execution
-- Read-only root filesystems where possible
-- Minimal base images (Alpine Linux)
-- Regular security scanning in CI/CD
-
-### **Network Security**
-
-- Network policies for pod-to-pod communication
-- Private endpoints for Azure services
-- WAF protection at ingress layer
-- Encrypted communication (TLS everywhere)
-
-### **Identity & Access**
-
-- Azure AD integration for cluster access
-- Managed identities for Azure service authentication
-- RBAC with principle of least privilege
-- Secrets stored in Azure Key Vault
-
 ## Local Development
 
 ### **Docker Compose Setup**
 
 ```bash
 # Start local development environment
+./scripts/local_development.sh
+
+# Or manually
 docker-compose up -d
 
 # Access applications
@@ -296,61 +207,67 @@ docker-compose up -d
 # API Docs: http://localhost:8000/docs
 ```
 
-### **Development Workflow**
+## Troubleshooting
 
-1. Make code changes
-2. Test locally with Docker Compose
-3. Create pull request for review
-4. Automated testing and security scanning
-5. Deploy to dev environment after merge
-
-## Troubleshooting Guide
+### **YAML Validation**
+```bash
+./scripts/utils/check_yaml.sh
+```
 
 ### **Common Issues**
 
-**AKS Deployment Issues**:
-
+**AKS Deployment Issues:**
 ```bash
-# Check cluster status
 kubectl get nodes
 kubectl get pods --all-namespaces
-
-# View logs
 kubectl logs -f deployment/backend -n pyreact-dev
 ```
 
-**Application Gateway Issues**:
-
+**Application Gateway Issues:**
 ```bash
-# Check ingress status
 kubectl get ingress -n pyreact-dev
 kubectl describe ingress main-ingress -n pyreact-dev
 ```
 
-**Database Connectivity**:
-
+**Database Connectivity:**
 ```bash
-# Test database connection from pod
 kubectl exec -it deployment/backend -n pyreact-dev -- \
   python -c "from main import engine; print(engine.execute('SELECT 1').scalar())"
 ```
 
-## Extending the Architecture
+## Cost Optimization
 
-### **Additional Features to Add**
+**Development Environment**: ~$200-400/month
+- AKS with 2 Standard_D2s_v3 nodes
+- PostgreSQL GP_Standard_D2s_v3
+- Standard Redis cache
+- Application Gateway v2
 
-- **Service Mesh** (Istio) for advanced traffic management
-- **GitOps** with ArgoCD for declarative deployments
-- **Multi-region** deployment for high availability
-- **API Gateway** (Azure API Management) for enterprise features
-- **Event-driven architecture** with Azure Service Bus
+**Production Environment**: ~$800-1500/month
+- Multi-zone AKS with auto-scaling
+- High-availability PostgreSQL
+- Premium Redis with clustering
+- WAF-enabled Application Gateway
 
-### **Scaling Considerations**
+## Security Best Practices
 
-- Horizontal Pod Autoscaler for application scaling
-- Cluster Autoscaler for node scaling
-- Database read replicas for read-heavy workloads
-- CDN integration for static asset optimization
+### **Container Security**
+- Non-root user execution
+- Read-only root filesystems where possible
+- Minimal base images (Alpine Linux)
+- Regular security scanning in CI/CD
+
+### **Network Security**
+- Network policies for pod-to-pod communication
+- Private endpoints for Azure services
+- WAF protection at ingress layer
+- Encrypted communication (TLS everywhere)
+
+### **Identity & Access**
+- Azure AD integration for cluster access
+- Managed identities for Azure service authentication
+- RBAC with principle of least privilege
+- Secrets stored in Azure Key Vault
 
 ## Contributing
 
@@ -359,5 +276,11 @@ kubectl exec -it deployment/backend -n pyreact-dev -- \
 3. Make your changes with tests
 4. Submit a pull request
 5. Ensure all security scans pass
+
+## Documentation
+
+- [GitHub Actions Setup Guide](docs/GITHUB_ACTIONS_SETUP.md)
+- [Architecture Deep Dive](docs/ARCHITECTURE.md) *(coming soon)*
+- [Security Guide](docs/SECURITY.md) *(coming soon)*
 
 This project demonstrates production-ready cloud-native architecture patterns and serves as a foundation for building scalable, secure applications on Azure.
