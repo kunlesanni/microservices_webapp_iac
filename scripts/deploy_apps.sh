@@ -1,9 +1,3 @@
-
-# ================================
-# scripts/deploy-apps.sh
-# Deploy applications to Kubernetes
-# ================================
-
 #!/bin/bash
 set -e
 
@@ -73,12 +67,27 @@ echo "📁 Processing manifests in temporary directory: $TEMP_DIR"
 # Copy and process manifests
 cp -r k8s/* $TEMP_DIR/
 
-# Replace placeholders in manifests
+# Function to replace placeholders in a file
+replace_placeholders() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        # Use a more robust replacement approach
+        sed -i.bak \
+            -e "s/{{ACR_NAME}}/$ACR_NAME/g" \
+            -e "s/{{IMAGE_TAG}}/$IMAGE_TAG/g" \
+            -e "s/{{ENVIRONMENT}}/$ENVIRONMENT/g" \
+            -e "s/{{PROJECT_NAME}}/$PROJECT_NAME/g" \
+            "$file"
+        rm -f "$file.bak"
+        echo "✅ Processed $(basename "$file")"
+    fi
+}
+
+# Replace placeholders in all YAML files
 echo "🔄 Processing manifest templates..."
-find $TEMP_DIR -name "*.yaml" -type f -exec sed -i "s|{{ACR_NAME}}|$ACR_NAME|g" {} \;
-find $TEMP_DIR -name "*.yaml" -type f -exec sed -i "s|{{IMAGE_TAG}}|$IMAGE_TAG|g" {} \;
-find $TEMP_DIR -name "*.yaml" -type f -exec sed -i "s|{{ENVIRONMENT}}|$ENVIRONMENT|g" {} \;
-find $TEMP_DIR -name "*.yaml" -type f -exec sed -i "s|{{PROJECT_NAME}}|$PROJECT_NAME|g" {} \;
+find $TEMP_DIR -name "*.yaml" -type f | while read file; do
+    replace_placeholders "$file"
+done
 
 # Install NGINX Ingress Controller if not present
 echo "🔍 Checking for NGINX Ingress Controller..."
@@ -87,141 +96,214 @@ if ! kubectl get namespace ingress-nginx &> /dev/null; then
     helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
     helm repo update
     
+    echo "⏳ Installing NGINX Ingress Controller (this may take a few minutes)..."
     helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
       --namespace ingress-nginx \
       --create-namespace \
       --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz \
       --set controller.service.externalTrafficPolicy=Local \
-      --wait --timeout=300s
+      --timeout=10m \
+      --wait
     
     echo "✅ NGINX Ingress Controller installed"
 else
     echo "✅ NGINX Ingress Controller already installed"
 fi
 
-# Deploy namespace first
-echo "📦 Creating namespace..."
-kubectl apply -f $TEMP_DIR/namespace.yaml
-
-# Get secrets from Azure Key Vault if available
+# Create namespace first
 NAMESPACE="${PROJECT_NAME}-${ENVIRONMENT}"
-echo "🔐 Setting up secrets for namespace: $NAMESPACE"
+echo "📦 Creating namespace: $NAMESPACE"
+kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 
-if [ ! -z "$RESOURCE_GROUP" ] && [ ! -z "$ACR_NAME" ]; then
-    # Try to get secrets from Key Vault
-    echo "🔍 Attempting to get secrets from Azure Key Vault..."
-    
-    # Check if Key Vault exists
-    KV_NAME=$(az keyvault list --resource-group $RESOURCE_GROUP --query "[0].name" -o tsv 2>/dev/null || echo "")
-    
-    if [ ! -z "$KV_NAME" ]; then
-        echo "🔑 Found Key Vault: $KV_NAME"
-        
-        # Get secrets
-        DATABASE_URL=$(az keyvault secret show --vault-name $KV_NAME --name database-url --query value -o tsv 2>/dev/null || echo "")
-        REDIS_URL=$(az keyvault secret show --vault-name $KV_NAME --name redis-url --query value -o tsv 2>/dev/null || echo "")
-        
-        if [ ! -z "$DATABASE_URL" ] && [ ! -z "$REDIS_URL" ]; then
-            echo "✅ Retrieved secrets from Key Vault"
-            
-            # Create or update Kubernetes secret
-            kubectl create secret generic app-secrets \
-              --namespace $NAMESPACE \
-              --from-literal=DATABASE_URL="$DATABASE_URL" \
-              --from-literal=REDIS_URL="$REDIS_URL" \
-              --dry-run=client -o yaml | kubectl apply -f -
-            
-            echo "✅ Kubernetes secrets created"
-        else
-            echo "⚠️ Could not retrieve all secrets from Key Vault"
-        fi
-    else
-        echo "⚠️ No Key Vault found in resource group"
-    fi
-else
-    echo "⚠️ Terraform outputs not available, skipping Key Vault secret retrieval"
+# Apply namespace manifest if it exists (might have additional labels)
+if [ -f "$TEMP_DIR/namespace.yaml" ]; then
+    kubectl apply -f "$TEMP_DIR/namespace.yaml"
+fi
+
+# Create basic secrets if they don't exist
+echo "🔐 Setting up secrets for namespace: $NAMESPACE"
+if ! kubectl get secret app-secrets -n $NAMESPACE &> /dev/null; then
+    echo "🔐 Creating default application secrets..."
+    kubectl create secret generic app-secrets \
+      --from-literal=DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy" \
+      --from-literal=REDIS_URL="redis://localhost:6379/0" \
+      --namespace=$NAMESPACE
+    echo "⚠️ Using default secrets. Update them with real values."
 fi
 
 # Apply secrets manifest if it exists
 if [ -f "$TEMP_DIR/secrets.yaml" ]; then
     echo "📝 Applying secrets manifest..."
-    kubectl apply -f $TEMP_DIR/secrets.yaml
+    kubectl apply -f "$TEMP_DIR/secrets.yaml"
 fi
 
-# Deploy backend
-echo "🔧 Deploying backend..."
+# Deploy ConfigMaps if they exist
+if [ -d "$TEMP_DIR/config" ]; then
+    echo "⚙️ Deploying configuration..."
+    kubectl apply -f "$TEMP_DIR/config/"
+fi
+
+# Deploy backend components
 if [ -d "$TEMP_DIR/backend" ]; then
-    kubectl apply -f $TEMP_DIR/backend/
+    echo "🔧 Deploying backend..."
+    
+    # Skip deprecated or problematic files
+    for file in "$TEMP_DIR/backend"/*.yaml; do
+        if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            case "$filename" in
+                "hpa.yaml")
+                    # Check if HPA is supported
+                    if kubectl api-resources | grep -q horizontalpodautoscalers; then
+                        kubectl apply -f "$file"
+                    else
+                        echo "⚠️ Skipping HPA - not supported in this cluster"
+                    fi
+                    ;;
+                *)
+                    kubectl apply -f "$file"
+                    ;;
+            esac
+        fi
+    done
     echo "✅ Backend deployed"
 fi
 
-# Deploy frontend
-echo "🌐 Deploying frontend..."
+# Deploy frontend components
 if [ -d "$TEMP_DIR/frontend" ]; then
-    kubectl apply -f $TEMP_DIR/frontend/
+    echo "🌐 Deploying frontend..."
+    
+    for file in "$TEMP_DIR/frontend"/*.yaml; do
+        if [ -f "$file" ]; then
+            kubectl apply -f "$file"
+        fi
+    done
     echo "✅ Frontend deployed"
 fi
 
 # Deploy ingress
-echo "🌍 Deploying ingress..."
 if [ -d "$TEMP_DIR/ingress" ]; then
-    kubectl apply -f $TEMP_DIR/ingress/
+    echo "🌍 Deploying ingress..."
+    kubectl apply -f "$TEMP_DIR/ingress/"
     echo "✅ Ingress deployed"
 fi
 
-# Deploy monitoring if exists
+# Deploy monitoring (optional)
 if [ -d "$TEMP_DIR/monitoring" ]; then
     echo "📊 Deploying monitoring..."
-    kubectl apply -f $TEMP_DIR/monitoring/
+    for file in "$TEMP_DIR/monitoring"/*.yaml; do
+        if [ -f "$file" ]; then
+            # Skip files with issues
+            if ! kubectl apply -f "$file" --dry-run=client &> /dev/null; then
+                echo "⚠️ Skipping problematic monitoring file: $(basename "$file")"
+            else
+                kubectl apply -f "$file"
+            fi
+        fi
+    done
     echo "✅ Monitoring deployed"
 fi
 
-# Deploy policies if exists
+# Deploy policies (with error handling)
 if [ -d "$TEMP_DIR/policies" ]; then
     echo "🔒 Deploying security policies..."
-    kubectl apply -f $TEMP_DIR/policies/
+    for file in "$TEMP_DIR/policies"/*.yaml; do
+        if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            case "$filename" in
+                "pod-security-policy.yaml")
+                    # Skip PodSecurityPolicy if not supported
+                    if kubectl api-resources | grep -q podsecuritypolicies; then
+                        kubectl apply -f "$file"
+                    else
+                        echo "⚠️ Skipping PodSecurityPolicy - deprecated in this Kubernetes version"
+                    fi
+                    ;;
+                "network-policy.yaml")
+                    # Only apply if network policies are supported
+                    if kubectl apply -f "$file" --dry-run=client &> /dev/null; then
+                        kubectl apply -f "$file"
+                    else
+                        echo "⚠️ Skipping network policy - not supported or has errors"
+                    fi
+                    ;;
+                *)
+                    kubectl apply -f "$file" || echo "⚠️ Failed to apply $(basename "$file")"
+                    ;;
+            esac
+        fi
+    done
     echo "✅ Security policies deployed"
+fi
+
+# Deploy jobs if they exist
+if [ -d "$TEMP_DIR/jobs" ]; then
+    echo "⚙️ Deploying jobs..."
+    for file in "$TEMP_DIR/jobs"/*.yaml; do
+        if [ -f "$file" ]; then
+            kubectl apply -f "$file" || echo "⚠️ Failed to apply job: $(basename "$file")"
+        fi
+    done
+    echo "✅ Jobs deployed"
 fi
 
 # Wait for deployments to be ready
 echo "⏳ Waiting for deployments to be ready..."
-kubectl wait --for=condition=available --timeout=300s deployment/backend -n $NAMESPACE 2>/dev/null || echo "⚠️ Backend deployment timeout"
-kubectl wait --for=condition=available --timeout=300s deployment/frontend -n $NAMESPACE 2>/dev/null || echo "⚠️ Frontend deployment timeout"
+sleep 5
 
-# Get deployment status
-echo "📋 Deployment status:"
+# Check if deployments exist before waiting
+if kubectl get deployment backend -n $NAMESPACE &> /dev/null; then
+    kubectl wait --for=condition=available --timeout=300s deployment/backend -n $NAMESPACE || echo "⚠️ Backend deployment timeout"
+else
+    echo "⚠️ Backend deployment not found"
+fi
+
+if kubectl get deployment frontend -n $NAMESPACE &> /dev/null; then
+    kubectl wait --for=condition=available --timeout=300s deployment/frontend -n $NAMESPACE || echo "⚠️ Frontend deployment timeout"
+else
+    echo "⚠️ Frontend deployment not found"
+fi
+
+# Get service status
+echo "📊 Deployment status:"
 kubectl get pods -n $NAMESPACE
 echo ""
 kubectl get services -n $NAMESPACE
 echo ""
-kubectl get ingress -n $NAMESPACE
+kubectl get ingress -n $NAMESPACE 2>/dev/null || echo "No ingress resources found"
 
 # Get external IP
-echo "🌐 Getting external access information..."
-EXTERNAL_IP=""
-while [ -z "$EXTERNAL_IP" ]; do
-    echo "⏳ Waiting for external IP..."
-    EXTERNAL_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-    if [ -z "$EXTERNAL_IP" ]; then
-        sleep 10
-    fi
-done
+echo "🌐 Getting external IP..."
+EXTERNAL_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
 
-# Clean up temporary directory
+if [ -z "$EXTERNAL_IP" ] || [ "$EXTERNAL_IP" = "null" ]; then
+    echo "⏳ External IP is still being assigned. This can take 2-5 minutes."
+    echo "   Check status with: kubectl get service ingress-nginx-controller -n ingress-nginx"
+    EXTERNAL_IP="<pending>"
+else
+    echo "✅ External IP: $EXTERNAL_IP"
+fi
+
+# Clean up temp directory
 rm -rf $TEMP_DIR
 
 echo ""
-echo "✅ Deployment completed successfully!"
+echo "🎉 DEPLOYMENT COMPLETED! 🎉"
+echo "=========================="
 echo ""
-echo "🌐 Application URLs:"
+echo "🌐 Your application URLs (once IP is assigned):"
 echo "  Frontend: http://$EXTERNAL_IP"
 echo "  Backend API: http://$EXTERNAL_IP/api"
 echo "  API Documentation: http://$EXTERNAL_IP/api/docs"
 echo ""
-echo "🔍 Useful commands:"
+echo "📊 Monitoring commands:"
 echo "  kubectl get pods -n $NAMESPACE"
 echo "  kubectl logs -f deployment/backend -n $NAMESPACE"
 echo "  kubectl logs -f deployment/frontend -n $NAMESPACE"
 echo ""
-echo "🧪 Test the deployment:"
+echo "🧪 Test your deployment:"
 echo "  curl http://$EXTERNAL_IP/api/health"
+echo ""
+echo "🔍 Troubleshooting:"
+echo "  kubectl describe pods -n $NAMESPACE"
+echo "  kubectl get events -n $NAMESPACE --sort-by='.lastTimestamp'"

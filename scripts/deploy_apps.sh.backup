@@ -1,0 +1,184 @@
+
+# ================================
+# scripts/deploy-apps.sh
+# Deploy applications to Kubernetes
+# ================================
+
+#!/bin/bash
+set -e
+
+echo "🚀 Deploying applications to Kubernetes..."
+
+# Check if kubectl is installed
+if ! command -v kubectl &> /dev/null; then
+    echo "❌ kubectl is not installed. Please install it first."
+    exit 1
+fi
+
+# Check if cluster is accessible
+if ! kubectl cluster-info &> /dev/null; then
+    echo "❌ Cannot connect to Kubernetes cluster."
+    echo "Run: az aks get-credentials --resource-group <rg-name> --name <cluster-name>"
+    exit 1
+fi
+
+# Get cluster info
+CLUSTER_INFO=$(kubectl cluster-info | head -n 1)
+echo "📋 Connected to: $CLUSTER_INFO"
+
+# Get required values
+if [ -d "terraform" ]; then
+    echo "📋 Getting values from Terraform..."
+    cd terraform
+    ACR_NAME=$(terraform output -raw container_registry_name 2>/dev/null || echo "")
+    RESOURCE_GROUP=$(terraform output -raw resource_group_name 2>/dev/null || echo "")
+    AKS_CLUSTER=$(terraform output -raw aks_cluster_name 2>/dev/null || echo "")
+    cd ..
+fi
+
+# Set defaults
+ENVIRONMENT=${ENVIRONMENT:-"dev"}
+PROJECT_NAME=${PROJECT_NAME:-"pyreact"}
+
+# Get image tag
+if [ -f ".last-image-tag" ]; then
+    IMAGE_TAG=$(cat .last-image-tag)
+    echo "📝 Using image tag from last build: $IMAGE_TAG"
+else
+    IMAGE_TAG="latest"
+    echo "📝 Using default image tag: $IMAGE_TAG"
+fi
+
+# If ACR not found, prompt
+if [ -z "$ACR_NAME" ]; then
+    read -p "Enter your Azure Container Registry name: " ACR_NAME
+fi
+
+echo "🏗️ Deployment configuration:"
+echo "  ACR: $ACR_NAME"
+echo "  Environment: $ENVIRONMENT"
+echo "  Image Tag: $IMAGE_TAG"
+echo "  Project: $PROJECT_NAME"
+
+# Check if Kubernetes manifests exist
+if [ ! -d "k8s" ]; then
+    echo "❌ Kubernetes manifests directory 'k8s' not found."
+    exit 1
+fi
+
+# Create temporary directory for processed manifests
+TEMP_DIR=$(mktemp -d)
+echo "📁 Processing manifests in temporary directory: $TEMP_DIR"
+
+# Copy and process manifests
+cp -r k8s/* $TEMP_DIR/
+
+# Replace placeholders in manifests using envsubst (more portable)
+echo "🔄 Processing manifest templates..."
+export ACR_NAME_PLACEHOLDER="{{ACR_NAME}}"
+export IMAGE_TAG_PLACEHOLDER="{{IMAGE_TAG}}"
+export ENVIRONMENT_PLACEHOLDER="{{ENVIRONMENT}}"
+export PROJECT_NAME_PLACEHOLDER="{{PROJECT_NAME}}"
+
+for file in $TEMP_DIR/*.yaml; do
+    if [ -f "$file" ]; then
+        # Create temporary file
+        temp_file=$(mktemp)
+        
+        # Replace placeholders one by one
+        cat "$file" | \
+        sed "s#{{ACR_NAME}}#$ACR_NAME#g" | \
+        sed "s#{{IMAGE_TAG}}#$IMAGE_TAG#g" | \
+        sed "s#{{ENVIRONMENT}}#$ENVIRONMENT#g" | \
+        sed "s#{{PROJECT_NAME}}#$PROJECT_NAME#g" > "$temp_file"
+        
+        # Move back to original file
+        mv "$temp_file" "$file"
+        
+        echo "✅ Processed $(basename "$file")"
+    fi
+done
+
+# Install NGINX Ingress Controller if not present
+echo "🔍 Checking for NGINX Ingress Controller..."
+if ! kubectl get namespace ingress-nginx &> /dev/null; then
+    echo "📦 Installing NGINX Ingress Controller..."
+    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
+    helm repo update
+    
+    # Install with increased timeout and proper Azure configuration
+    echo "⏳ Installing NGINX Ingress Controller (this may take a few minutes)..."
+    helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+      --namespace ingress-nginx \
+      --create-namespace \
+      --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz \
+      --set controller.service.externalTrafficPolicy=Local \
+      --timeout=10m \
+      --wait
+    
+    echo "✅ NGINX Ingress Controller installed"
+else
+    echo "✅ NGINX Ingress Controller already installed"
+fi
+
+# Deploy namespace first
+echo "📦 Creating namespace..."
+NAMESPACE="${PROJECT_NAME}-${ENVIRONMENT}"
+kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+
+# Create basic secrets if they don't exist
+echo "🔐 Setting up secrets for namespace: $NAMESPACE"
+if ! kubectl get secret app-secrets -n $NAMESPACE &> /dev/null; then
+    echo "🔐 Creating default application secrets..."
+    kubectl create secret generic app-secrets \
+      --from-literal=DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy" \
+      --from-literal=REDIS_URL="redis://localhost:6379/0" \
+      --namespace=$NAMESPACE
+    echo "⚠️ Using default secrets. Update them with real values from your Key Vault."
+fi
+
+# Deploy all manifests
+echo "🚀 Deploying applications..."
+kubectl apply -f $TEMP_DIR/ --recursive
+
+# Wait for deployments to be ready
+echo "⏳ Waiting for deployments to be ready..."
+kubectl wait --for=condition=available --timeout=300s deployment/backend -n $NAMESPACE || echo "⚠️ Backend deployment timeout - check logs"
+kubectl wait --for=condition=available --timeout=300s deployment/frontend -n $NAMESPACE || echo "⚠️ Frontend deployment timeout - check logs"
+
+# Get service status
+echo "📊 Deployment status:"
+kubectl get pods -n $NAMESPACE
+kubectl get services -n $NAMESPACE
+kubectl get ingress -n $NAMESPACE
+
+# Get external IP
+echo "🌐 Getting external IP..."
+EXTERNAL_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending...")
+
+if [ "$EXTERNAL_IP" = "pending..." ]; then
+    echo "⏳ External IP is still being assigned. This can take 2-5 minutes."
+    echo "   Check status with: kubectl get service ingress-nginx-controller -n ingress-nginx"
+else
+    echo "✅ External IP: $EXTERNAL_IP"
+fi
+
+# Clean up temp directory
+rm -rf $TEMP_DIR
+
+echo ""
+echo "🎉 DEPLOYMENT COMPLETED! 🎉"
+echo "=========================="
+echo ""
+echo "🌐 Your application URLs (once IP is assigned):"
+echo "  Frontend: http://$EXTERNAL_IP"
+echo "  Backend API: http://$EXTERNAL_IP/api"
+echo "  API Documentation: http://$EXTERNAL_IP/api/docs"
+echo ""
+echo "📊 Monitoring commands:"
+echo "  kubectl get pods -n $NAMESPACE"
+echo "  kubectl logs -f deployment/backend -n $NAMESPACE"
+echo "  kubectl logs -f deployment/frontend -n $NAMESPACE"
+echo ""
+echo "🧪 Test your deployment:"
+echo "  curl http://$EXTERNAL_IP/api/health"

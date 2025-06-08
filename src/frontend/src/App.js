@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
-import TaskList from './components/Tasklist';
-import TaskForm from './components/Taskform';
+import TaskList from './components/TaskList';
+import TaskForm from './components/TaskForm';
 import Stats from './components/Stats';
 import { PlusIcon, ChartBarIcon, ListBulletIcon } from '@heroicons/react/24/outline';
 import './App.css';
