@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
-import TaskList from './components/TaskList';
-import TaskForm from './components/TaskForm';
+import TaskList from './components/Tasklist';
+import TaskForm from './components/Taskform';
 import Stats from './components/Stats';
 import { PlusIcon, ChartBarIcon, ListBulletIcon } from '@heroicons/react/24/outline';
 import './App.css';
@@ -55,10 +55,43 @@ function App() {
 
   const fetchTasks = async () => {
     try {
+      setLoading(true);
       const response = await fetch(`${API_BASE}/tasks`);
       if (!response.ok) throw new Error('Failed to fetch tasks');
       const data = await response.json();
       setTasks(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const addTask = async (taskData) => {
+    try {
+      const response = await fetch(`${API_BASE}/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(taskData)
+      });
+      if (!response.ok) throw new Error('Failed to create task');
+      await fetchTasks(); // Refresh the list
+      return true;
+    } catch (err) {
+      setError(err.message);
+      return false;
+    }
+  };
+
+  const updateTask = async (id, taskData) => {
+    try {
+      const response = await fetch(`${API_BASE}/tasks/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(taskData)
+      });
+      if (!response.ok) throw new Error('Failed to update task');
+      await fetchTasks(); // Refresh the list
     } catch (err) {
       setError(err.message);
     }
@@ -130,7 +163,3 @@ function App() {
 }
 
 export default App;
-
-
-
-
