@@ -93,21 +93,63 @@ done
 echo "🔍 Checking for NGINX Ingress Controller..."
 if ! kubectl get namespace ingress-nginx &> /dev/null; then
     echo "📦 Installing NGINX Ingress Controller..."
-    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
+    
+    # Add helm repo if not exists
+    if ! helm repo list | grep -q ingress-nginx; then
+        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+    fi
     helm repo update
     
-    echo "⏳ Installing NGINX Ingress Controller (this may take a few minutes)..."
-    helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+    echo "⏳ Installing NGINX Ingress Controller (this may take up to 10 minutes)..."
+    
+    # Try to install with extended timeout and better error handling
+    if ! helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
       --namespace ingress-nginx \
       --create-namespace \
       --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz \
       --set controller.service.externalTrafficPolicy=Local \
-      --timeout=10m \
-      --wait
+      --timeout=15m \
+      --wait; then
+        
+        echo "⚠️ NGINX Ingress Controller installation timed out or failed."
+        echo "🔧 Attempting alternative installation method..."
+        
+        # Try without --wait flag
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+          --namespace ingress-nginx \
+          --create-namespace \
+          --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz \
+          --set controller.service.externalTrafficPolicy=Local \
+          --timeout=15m
+        
+        echo "⏳ Waiting for NGINX Ingress Controller to be ready..."
+        kubectl wait --namespace ingress-nginx \
+          --for=condition=ready pod \
+          --selector=app.kubernetes.io/component=controller \
+          --timeout=600s || echo "⚠️ NGINX controller pods may still be starting"
+        
+        echo "⏳ Waiting for LoadBalancer service..."
+        kubectl wait --namespace ingress-nginx \
+          --for=jsonpath='{.status.loadBalancer.ingress}' \
+          service/ingress-nginx-controller \
+          --timeout=600s || echo "⚠️ LoadBalancer IP assignment may take longer"
+    fi
     
-    echo "✅ NGINX Ingress Controller installed"
+    echo "✅ NGINX Ingress Controller installation completed"
 else
     echo "✅ NGINX Ingress Controller already installed"
+    
+    # Check if it's actually running
+    if ! kubectl get pods -n ingress-nginx | grep -q "Running"; then
+        echo "⚠️ NGINX Ingress Controller pods are not running. Checking status..."
+        kubectl get pods -n ingress-nginx
+        echo "🔧 Attempting to restart..."
+        kubectl rollout restart deployment/ingress-nginx-controller -n ingress-nginx
+        kubectl wait --namespace ingress-nginx \
+          --for=condition=ready pod \
+          --selector=app.kubernetes.io/component=controller \
+          --timeout=300s || echo "⚠️ Controller restart may need more time"
+    fi
 fi
 
 # Create namespace first
@@ -272,16 +314,28 @@ kubectl get services -n $NAMESPACE
 echo ""
 kubectl get ingress -n $NAMESPACE 2>/dev/null || echo "No ingress resources found"
 
-# Get external IP
+# Get external IP with better error handling
 echo "🌐 Getting external IP..."
-EXTERNAL_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+echo "⏳ Waiting for LoadBalancer IP assignment (this can take 2-10 minutes)..."
+
+# Wait for external IP with timeout
+EXTERNAL_IP=""
+for i in {1..30}; do
+    EXTERNAL_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+    
+    if [ -n "$EXTERNAL_IP" ] && [ "$EXTERNAL_IP" != "null" ]; then
+        echo "✅ External IP assigned: $EXTERNAL_IP"
+        break
+    fi
+    
+    echo "⏳ Waiting for IP assignment... (attempt $i/30)"
+    sleep 20
+done
 
 if [ -z "$EXTERNAL_IP" ] || [ "$EXTERNAL_IP" = "null" ]; then
-    echo "⏳ External IP is still being assigned. This can take 2-5 minutes."
+    echo "⚠️ External IP is still being assigned. This can take up to 10 minutes."
     echo "   Check status with: kubectl get service ingress-nginx-controller -n ingress-nginx"
     EXTERNAL_IP="<pending>"
-else
-    echo "✅ External IP: $EXTERNAL_IP"
 fi
 
 # Clean up temp directory
@@ -307,3 +361,6 @@ echo ""
 echo "🔍 Troubleshooting:"
 echo "  kubectl describe pods -n $NAMESPACE"
 echo "  kubectl get events -n $NAMESPACE --sort-by='.lastTimestamp'"
+echo ""
+echo "💡 If external IP is still pending, check:"
+echo "  kubectl get service ingress-nginx-controller -n ingress-nginx -w"
